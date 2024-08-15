@@ -1,0 +1,13 @@
+[package]
+name = "latex-pdf"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0.86"
+cairo-rs = { version = "0.18.5", features = ["png", "pdf"] }
+image = "0.25.2"
+#pdf = "0.9.0"
+printpdf = { version = "0.7.0", features = ["image", "embedded_images"] }
+poppler = { version = "0.5.1", features = ["render"] }
+tectonic = { version = "0.15.0", features = ["external-harfbuzz"] }
