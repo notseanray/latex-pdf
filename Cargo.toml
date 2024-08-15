@@ -7,7 +7,21 @@ edition = "2021"
 anyhow = "1.0.86"
 cairo-rs = { version = "0.18.5", features = ["png", "pdf"] }
 image = "0.25.2"
-#pdf = "0.9.0"
-printpdf = { version = "0.7.0", features = ["image", "embedded_images"] }
+pdf = "0.9.0"
 poppler = { version = "0.5.1", features = ["render"] }
 tectonic = { version = "0.15.0", features = ["external-harfbuzz"] }
+lopdf = "0.33.0"
+imagesize = "0.13.0"
+rusty_pdf = "0.21.0"
+
+[profile.dev]
+debug = true
+lto = "thin"
+
+
+[profile.release]
+codegen-units = 1       # better optimizations
+opt-level = 3
+overflow-checks = false
+lto = "fat"
+strip = "symbols"

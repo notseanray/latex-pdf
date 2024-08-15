@@ -6,16 +6,16 @@ use image::DynamicImage;
 use image::ImageFormat;
 use image::ImageReader;
 use image::RgbImage;
+use pdf::file::FileOptions;
 use poppler::PopplerDocument;
 use poppler::PopplerPage;
-use printpdf::image_crate::codecs::png::PngDecoder;
-use printpdf::Image;
-use printpdf::ImageTransform;
-use printpdf::Mm;
-use printpdf::PdfDocument;
+use rusty_pdf::lopdf::Document;
+use std::fs;
 use std::fs::File;
 use std::io::Write;
 use std::io::{BufWriter, Cursor};
+use imagesize::{blob_size, ImageSize};
+use rusty_pdf::{PDFSigningDocument, Rectangle};
 
 pub fn save_pdf_as_image(path: &str) -> Result<()> {
     let doc: PopplerDocument = PopplerDocument::new_from_file(path, Some("upw")).unwrap();
@@ -45,12 +45,10 @@ pub fn save_pdf_as_image(path: &str) -> Result<()> {
     let surface = ImageSurface::create(Format::A8, w as i32, h as i32).unwrap();
     let ctx = Context::new(&surface).unwrap();
 
-    (|page: &PopplerPage, ctx: &Context| {
-        ctx.save().unwrap();
-        page.render(ctx);
-        ctx.restore().unwrap();
-        ctx.show_page().unwrap();
-    })(&page, &ctx);
+    ctx.save().unwrap();
+    page.render(&ctx);
+    ctx.restore().unwrap();
+    ctx.show_page().unwrap();
 
     let mut f: File = File::create("out.png").unwrap();
     surface.write_to_png(&mut f).expect("Unable to write PNG");
@@ -58,6 +56,22 @@ pub fn save_pdf_as_image(path: &str) -> Result<()> {
 }
 
 fn main() -> Result<()> {
+    {
+        let mut file = FileOptions::cached().open("input.pdf")?;
+        //let mut answer_boxes: Option<_> = None;
+        /*
+        let page0 = file.get_page(0).unwrap();
+        let annots = page0.media_box.clone().unwrap();
+        */
+        for page in 0..file.num_pages() {
+
+        }
+        let root = file.get_page(0).unwrap();
+        println!("{:#?}", root);
+    }
+
+
+    // TODO return pdf dims
     save_pdf_as_image("test.pdf")?;
 
     {
@@ -86,62 +100,38 @@ fn main() -> Result<()> {
         rgb_img.write_to(&mut writer, ImageFormat::Png)?;
         writer.flush()?;
     }
-    /*
-    let img_data = std::fs::read("out.png")?;
-    let img = ImageReader::with_format(Cursor::new(&img_data), image::ImageFormat::Png).decode()?;
 
-    let output_file = File::create("out.jpeg")?;
-    let mut writer = BufWriter::new(output_file);
-    let (width, height) = (img.width(), img.height());
-    let rgb_img = match img {
-        DynamicImage::ImageRgba8(rgba_img) => {
-            // Convert RGBA to RGB by discarding the alpha channel
-            let rgba_img = rgba_img.as_raw();
+    let doc_mem = fs::read("input.pdf").unwrap();
 
-            let mut rgb_img = vec![0u8; (width * height * 3) as usize];
-            for (idx, chunk) in rgba_img.chunks(4).enumerate() {
-                let i = idx * 3;
-                // the exporter tends to only use alpha channel to set color
-                if chunk[0..3] == [0; 3] && chunk[3] != 0 {
-                    rgb_img[i..i+3].copy_from_slice(&[255 - chunk[3], 255 - chunk[3], 255 - chunk[3]]);
-                } else if chunk[0..3] != [0; 3] {
-                    // scale by alpha to determine color strength, TODO might need to subtract from
-                    // 255 to get it to actually match the intended colors
-                    rgb_img[i..i+3].copy_from_slice(&chunk[0..3].iter().map(|x| (*x as f32 * ((chunk[3] as f32) / 255.0)) as u8).collect::<Vec<u8>>());
-                } else {
-                    // default white background for this
-                    rgb_img[i..i+3].copy_from_slice(&[255, 255, 255]);
-                }
-            }
-            DynamicImage::ImageRgb8(RgbImage::from_raw(width, height, rgb_img).expect("Corrupt png"))
-        },
-        _ => img,
-    };
-    rgb_img.write_to(&mut writer, ImageFormat::Jpeg)?;
+    let doc = Document::load_mem(&doc_mem).unwrap_or_default();
 
+    let image_mem = fs::read("out.png").unwrap();
 
-    let img_data = std::fs::read("out.jpeg")?;
-    */
-    let (doc, page1, layer1) =
-        PdfDocument::new("PDF_Document_title", Mm(247.0), Mm(210.0), "Layer 1");
-    let current_layer = doc.get_page(page1).get_layer(layer1);
+    let dimensions = blob_size(&image_mem).unwrap_or(ImageSize {
+        width: 0,
+        height: 0,
+    });
 
-    let img_data = std::fs::read("out.png")?;
-    let mut reader = Cursor::new(img_data);
-    let decoder = PngDecoder::new(&mut reader).unwrap();
-    let image = Image::try_from(decoder).unwrap();
-
-    // layer,
-    image.add_to_layer(
-        current_layer.clone(),
-        ImageTransform {
-            rotate: None,
-            translate_x: Some(Mm(5.0)),
-            translate_y: Some(Mm(5.0)),
-            ..Default::default()
-        },
+    let scaled_vec = Rectangle::scale_image_on_width(
+        150.0,
+        200.0,
+        500.0,
+        (dimensions.width as f64, dimensions.height as f64),
     );
-    doc.save(&mut BufWriter::new(File::create("test_image.pdf").unwrap()))
+
+    let file = Cursor::new(image_mem);
+    let mut test_doc = PDFSigningDocument::new(doc);
+    let object_id = test_doc.add_object_from_scaled_vec(scaled_vec);
+    let page_id = *test_doc
+        .get_document_ref()
+        .get_pages()
+        .get(&1)
+        .unwrap_or(&(0, 0));
+
+    test_doc
+        .add_signature_to_form(file.clone(), "signature_1", page_id, object_id)
         .unwrap();
+
+    test_doc.finished().save("output.pdf").unwrap();
     Ok(())
 }
