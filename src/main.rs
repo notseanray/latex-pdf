@@ -18,7 +18,7 @@ use std::io::Write;
 use std::io::{BufWriter, Cursor};
 
 mod canny;
-use canny::{canny, Edge};
+use canny::canny;
 
 pub fn save_pdf_as_image(path: &str, output_path: &str) -> Result<(f64, f64)> {
     let doc: PopplerDocument = PopplerDocument::new_from_file(path, Some("upw")).unwrap();
@@ -27,7 +27,7 @@ pub fn save_pdf_as_image(path: &str, output_path: &str) -> Result<(f64, f64)> {
     let version_string = doc.get_pdf_version_string();
     let permissions = doc.get_permissions();
     let mut width = 0.0;
-    let mut height;
+    let mut height = 0.0;
     for page_num in 0..doc.get_n_pages() {
         let page: PopplerPage = doc.get_page(page_num).unwrap();
         let (w, h) = page.get_size();
@@ -69,7 +69,7 @@ pub fn save_pdf_as_image(path: &str, output_path: &str) -> Result<(f64, f64)> {
     Ok((width, height))
 }
 
-fn find_answer_box(path: &str) -> Result<Option<(usize, usize, usize, usize)>> {
+fn find_answer_boxes(path: &str) -> Result<Option<(usize, usize, usize, usize)>> {
     let source_image = image::open(path)?.to_luma8();
     let detection = canny(
         source_image,
@@ -102,23 +102,12 @@ fn find_answer_box(path: &str) -> Result<Option<(usize, usize, usize, usize)>> {
             vertical_box_starts.push(idx);
         }
     }
-    assert!(vertical_box_starts.len() == 4);
-    if vertical_box_starts[0].max(vertical_box_starts[1])
-        - vertical_box_starts[0].min(vertical_box_starts[1])
-        > 5
-    {
-        println!("box upper dimensions too variable");
-        return Ok(None);
+    assert!(vertical_box_starts.len() % 4 == 0);
+    let mut vertical_box_starts_trimmed = vec![0; vertical_box_starts.len() / 2];
+    for i in 1..=vertical_box_starts.len() / 4 {
+        vertical_box_starts_trimmed[i..i+1] = vertical_box_starts[i * 1..i * 3];
+        println!("vertical lines {:#?}", vertical_box_starts);
     }
-    if vertical_box_starts[2].max(vertical_box_starts[3])
-        - vertical_box_starts[2].min(vertical_box_starts[3])
-        > 5
-    {
-        println!("box bottom dimensions too variable");
-        return Ok(None);
-    }
-    vertical_box_starts = vertical_box_starts[1..3].to_vec();
-    println!("vertical lines {:#?}", vertical_box_starts);
 
     let largest = *horizontal_lines.iter().max().unwrap_or(&0);
     let max_range = largest as f32 * 0.95;
@@ -255,7 +244,7 @@ fn main() -> Result<()> {
 
     let mut boxes = Vec::with_capacity(pages.len());
     for (idx, page) in pages.iter().enumerate() {
-        let box_pos = find_answer_box(&page)?;
+        let box_pos = find_answer_boxes(&page)?;
         if let Some(v) = box_pos {
             boxes.push(v);
         } else {
