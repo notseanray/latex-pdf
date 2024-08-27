@@ -22,10 +22,8 @@ use opencv::core::Vector;
 use opencv::imgcodecs;
 use opencv::imgproc;
 use opencv::imgproc::bounding_rect;
-use opencv::imgproc::rectangle;
 use opencv::imgproc::CHAIN_APPROX_SIMPLE;
 use opencv::imgproc::RETR_EXTERNAL;
-use opencv::imgproc::RETR_LIST;
 use opencv::imgproc::THRESH_BINARY;
 use opencv::imgproc::THRESH_OTSU;
 use opencv::types::VectorOfVectorOfPoint;
@@ -36,53 +34,64 @@ use rusty_pdf::{PDFSigningDocument, Rectangle};
 use std::fs;
 use std::fs::File;
 use std::io::stdin;
+use std::io::BufRead;
+use std::io::BufReader;
 use std::io::Write;
 use std::io::{BufWriter, Cursor};
+use std::process::Command;
 
-pub fn save_pdf_as_image(path: &str, output_path: &str) -> Result<(f64, f64)> {
+pub fn save_pdf_as_image(path: &str, output_path: &str, enumerate: bool, input_width: Option<i32>, input_height: Option<i32>) -> Result<(f64, f64)> {
     let doc: PopplerDocument = PopplerDocument::new_from_file(path, Some("upw")).unwrap();
-    let num_pages = doc.get_n_pages();
-    let title = doc.get_title().unwrap();
     let version_string = doc.get_pdf_version_string();
     let permissions = doc.get_permissions();
-    let mut width = 0.0;
-    let mut height = 0.0;
+    let width = 0.;
+    let height = 0.;
     for page_num in 0..doc.get_n_pages() {
         let page: PopplerPage = doc.get_page(page_num).unwrap();
         let (w, h) = page.get_size();
         if width != 0.0 && width != w {
             panic!("width changes");
         }
-        width = w;
-        height = h;
+        let mut width = w as i32;
+        let mut height = h as i32;
 
-        println!(
-            "Document {} has {} page(s) and is {}x{}",
-            title, num_pages, w, h
-        );
+        if let (Some(w), Some(h)) = (input_width, input_height) {
+            width = w;
+            height = h;
+        }
+
         println!(
             "Version: {:?}, Permissions: {:x?}",
             version_string, permissions
         );
 
-        let surface = ImageSurface::create(Format::A8, w as i32, h as i32).unwrap();
+        let surface = ImageSurface::create(Format::A8, width, height).unwrap();
         let ctx = Context::new(&surface).unwrap();
+        ctx.set_antialias(cairo::Antialias::Subpixel);
+        ctx.font_options().unwrap().set_antialias(cairo::Antialias::Subpixel);
+        ctx.font_options().unwrap().set_hint_style(cairo::HintStyle::Full);
 
         ctx.save().unwrap();
-        page.render(&ctx);
+        page.render_for_printing(&ctx);
         ctx.restore().unwrap();
         ctx.show_page().unwrap();
 
-        if let Some((path, _extension)) = output_path.split_once(".") {
-            let mut padded_page_num = format!("{page_num}");
-            let page_num_str_len = format!("{page_num}").len();
-            if page_num_str_len < 3 {
-                for _ in 0..3 - page_num_str_len {
-                    padded_page_num = format!("0{padded_page_num}");
+        if enumerate {
+            if let Some((path, _extension)) = output_path.split_once(".") {
+                let mut padded_page_num = format!("{page_num}");
+                let page_num_str_len = format!("{page_num}").len();
+                if page_num_str_len < 3 {
+                    for _ in 0..3 - page_num_str_len {
+                        padded_page_num = format!("0{padded_page_num}");
+                    }
                 }
+                let mut f: File = File::create(format!("{path}_{padded_page_num}.png")).unwrap();
+                surface.write_to_png(&mut f).expect("Unable to write PNG");
             }
-            let mut f: File = File::create(format!("{path}_{padded_page_num}.png")).unwrap();
+        } else {
+            let mut f: File = File::create(output_path).unwrap();
             surface.write_to_png(&mut f).expect("Unable to write PNG");
+            render_pdf_to_png_and_resize(output_path, output_path, width as u32, height as u32)?;
         }
     }
     Ok((width, height))
@@ -256,8 +265,8 @@ fn find_answer_boxes(path: &str) -> Result<Option<(usize, usize, usize, usize)>>
 pub fn render_pdf_to_png_and_resize(
     input_path: &str,
     output_path: &str,
-    width: usize,
-    height: usize,
+    target_width: u32,
+    target_height: u32,
 ) -> Result<()> {
     let img_data = std::fs::read(input_path)?;
     let output_file = File::create(output_path)?;
@@ -280,7 +289,7 @@ pub fn render_pdf_to_png_and_resize(
         }
         _ => img,
     };
-    let rgb_img = rgb_img.crop(0, 0, width, height);
+    let rgb_img = rgb_img.crop(0, 0, target_width, target_height);
     rgb_img.write_to(&mut writer, ImageFormat::Png)?;
     writer.flush()?;
     Ok(())
@@ -288,10 +297,12 @@ pub fn render_pdf_to_png_and_resize(
 
 pub fn place_png_on_pdf(
     input_pdf: &str,
+    page_num: u32,
     image_input: &str,
     x: f64,
     y: f64,
     width: usize,
+    height: usize,
 ) -> Result<()> {
     let doc_mem = fs::read(input_pdf)?;
 
@@ -306,7 +317,7 @@ pub fn place_png_on_pdf(
         width as f64,
         x,
         y,
-        (dimensions.width as f64, dimensions.height as f64),
+        (width as f64, height as f64),
     );
 
     let file = Cursor::new(image_mem);
@@ -315,24 +326,73 @@ pub fn place_png_on_pdf(
     let page_id = *test_doc
         .get_document_ref()
         .get_pages()
-        .get(&1)
+        .get(&page_num)
         .unwrap_or(&(0, 0));
 
     test_doc
-        .add_signature_to_form(file.clone(), "signature_1", page_id, object_id)
+        .add_signature_to_form(file.clone(), image_input, page_id, object_id)
         .unwrap();
 
     test_doc.finished().save("output.pdf").unwrap();
     Ok(())
 }
 
+fn check_for_yes(quit_msg: &str) -> Result<()> {
+    println!("type yes if you need ");
+    let mut buffer = String::new();
+    stdin().read_line(&mut buffer)?;
+    if buffer.trim() != "Yes" {
+        panic!("{quit_msg}");
+    }
+    Ok(())
+}
+
+fn render_latex(latex_solution: &str, idx: usize, width: i32, height: i32) -> Result<String> {
+    let path = format!("work/problem_{idx}.tex");
+    fs::write(&path, latex_solution)?;
+    let output = Command::new("tectonic").args([&path]).output()?;
+    let output = String::from_utf8(output.stdout)?;
+    if !output.contains("Writing ") {
+        println!("tectonic command might have failed: ");
+        println!("{output}");
+        check_for_yes("quit due to user selection")?;
+    }
+    let png_path = format!("work/problem_{idx}.png");
+    let path = format!("work/problem_{idx}.pdf");
+    println!("{path}");
+    save_pdf_as_image(&path, &png_path, false, Some(width), Some(height))?;
+    Ok(png_path)
+}
+
 fn main() -> Result<()> {
     if !fs::exists("work")? {
         fs::create_dir("work")?;
     }
+    for entry in std::fs::read_dir("work")? {
+        let entry = entry?;
+        std::fs::remove_file(entry.path())?;
+    }
 
-    println!("Saving og pdf as image");
-    let (original_width, original_height) = save_pdf_as_image("input.pdf", "work/original.png")?;
+    //let latex = render_latex("math.tex")?;
+    let f = File::open("math.tex")?;
+    let reader = BufReader::new(f);
+
+    // random choice
+    let mut latex = Vec::with_capacity(5);
+    let mut prev_buf = String::with_capacity(500);
+    for line in reader.lines() {
+        let line = line?;
+        if &line == "<<-->>" {
+            latex.push(prev_buf.to_owned());
+            prev_buf.clear();
+        } else {
+            prev_buf.push_str(&line);
+        }
+    }
+    latex.push(prev_buf.to_owned());
+
+    //println!("Saving og pdf as image");
+    let (original_width, original_height) = save_pdf_as_image("input.pdf", "work/original.png", true, None, None)?;
 
     let work_dir = fs::read_dir("work")?;
     let mut pages = vec![];
@@ -350,34 +410,24 @@ fn main() -> Result<()> {
     println!("{:#?}", pages);
 
     println!("finding boxes");
-    for page in pages {
-        let boxes = find_answer_boxes(&page);
-        println!("page: {page} \n{:#?}", boxes);
+    let mut page_boxes = Vec::with_capacity(pages.len());
+    for (page_num, page) in pages.iter().enumerate() {
+        println!("{page}");
+        let boxes = find_answer_boxes(page).expect("Failed to get boxes");
+        for box_rect in boxes {
+            page_boxes.push((page_num, box_rect));
+        }
+    }
+    println!("boxes");
+    println!("{:#?}", page_boxes);
+
+    for (idx, ((page_num, rect), latex)) in page_boxes.iter().zip(latex).enumerate() {
+        let latex = render_latex(&latex, idx, rect.0, rect.1)?;
+        println!("placing problem {page_num} {latex}");
+        place_png_on_pdf("input.pdf", *page_num as u32, &latex, rect.2 as f64, rect.3 as f64, rect.0 as usize, rect.1 as usize)?;
     }
 
-    /*
-    let offset_coordinates: Vec<(f64, f64, usize, usize)> = boxes
-        .iter_mut()
-        .map(|(x, y, w, h)| {
-            (
-                original_width - *x as f64,
-                original_height - *y as f64,
-                *w,
-                *h,
-            )
-        })
-        .collect();
-
-    unimplemented!();
-
-    // let mut edges = detection.edges.into_iter().flatten().filter(|x| x.magnitude() > 0.0).collect::<Vec<Edge>>();
-    // edges.sort_by(|l, r| { if l.magnitude() > r.magnitude() { Ordering::Greater } else { Ordering::Less } });
-    // println!("{:#?}", edges);
-
-    // TODO return pdf dims
-    // Latex pdf
-    save_pdf_as_image("test.pdf", "work/latex.png")?;
-    */
+    //save_pdf_as_image("test.pdf", "work/latex.png")?;
 
     Ok(())
 }
