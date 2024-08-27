@@ -7,6 +7,28 @@ use image::ImageFormat;
 use image::ImageReader;
 use image::RgbImage;
 use imagesize::blob_size;
+use opencv::core::get_platfoms_info;
+use opencv::core::have_opencl;
+use opencv::core::set_use_opencl;
+use opencv::core::use_opencl;
+use opencv::core::Device;
+use opencv::core::DeviceTraitConst;
+use opencv::core::Mat;
+use opencv::core::MatTraitConst;
+use opencv::core::PlatformInfoTraitConst;
+use opencv::core::Size;
+use opencv::core::UMat;
+use opencv::core::Vector;
+use opencv::imgcodecs;
+use opencv::imgproc;
+use opencv::imgproc::bounding_rect;
+use opencv::imgproc::rectangle;
+use opencv::imgproc::CHAIN_APPROX_SIMPLE;
+use opencv::imgproc::RETR_EXTERNAL;
+use opencv::imgproc::RETR_LIST;
+use opencv::imgproc::THRESH_BINARY;
+use opencv::imgproc::THRESH_OTSU;
+use opencv::types::VectorOfVectorOfPoint;
 use poppler::PopplerDocument;
 use poppler::PopplerPage;
 use rusty_pdf::lopdf::Document;
@@ -16,9 +38,6 @@ use std::fs::File;
 use std::io::stdin;
 use std::io::Write;
 use std::io::{BufWriter, Cursor};
-
-mod canny;
-use canny::canny;
 
 pub fn save_pdf_as_image(path: &str, output_path: &str) -> Result<(f64, f64)> {
     let doc: PopplerDocument = PopplerDocument::new_from_file(path, Some("upw")).unwrap();
@@ -69,6 +88,97 @@ pub fn save_pdf_as_image(path: &str, output_path: &str) -> Result<(f64, f64)> {
     Ok((width, height))
 }
 
+fn find_answer_boxes(path: &str) -> Result<Vec<(i32, i32, i32, i32)>> {
+    let opencl_have = have_opencl()?;
+    if opencl_have {
+        set_use_opencl(true)?;
+        let mut platforms = Vector::new();
+        get_platfoms_info(&mut platforms)?;
+        for (platf_num, platform) in platforms.into_iter().enumerate() {
+            println!("Platform #{}: {}", platf_num, platform.name()?);
+            for dev_num in 0..platform.device_number()? {
+                let mut dev = Device::default();
+                platform.get_device(&mut dev, dev_num)?;
+                println!("  OpenCL device #{}: {}", dev_num, dev.name()?);
+                println!("    vendor:  {}", dev.vendor_name()?);
+                println!("    version: {}", dev.version()?);
+            }
+        }
+    }
+    let opencl_use = use_opencl()?;
+    println!(
+        "OpenCL is {} and {}",
+        if opencl_have {
+            "available"
+        } else {
+            "not available"
+        },
+        if opencl_use { "enabled" } else { "disabled" },
+    );
+    Ok(if opencl_use {
+        let mat = imgcodecs::imread_def(path)?;
+        let img = mat.get_umat(
+            opencv::core::AccessFlag::ACCESS_READ,
+            opencv::core::UMatUsageFlags::USAGE_ALLOCATE_DEVICE_MEMORY,
+        )?;
+        let mut gray = UMat::new_def();
+        imgproc::cvt_color_def(&img, &mut gray, imgproc::COLOR_BGR2GRAY)?;
+        let mut blurred = UMat::new_def();
+        imgproc::gaussian_blur_def(&gray, &mut blurred, Size::new(7, 7), 1.5)?;
+        let mut threshold = UMat::new_def();
+        imgproc::threshold(
+            &blurred,
+            &mut threshold,
+            0.,
+            255.,
+            THRESH_BINARY + THRESH_OTSU,
+        )?;
+        let mut contours = VectorOfVectorOfPoint::new();
+        imgproc::find_contours(
+            &threshold,
+            &mut contours,
+            RETR_EXTERNAL,
+            CHAIN_APPROX_SIMPLE,
+            opencv::core::Point_::new(0, 0),
+        )?;
+        contours
+    } else {
+        let img = imgcodecs::imread_def(path)?;
+        let mut gray = Mat::default();
+        imgproc::cvt_color_def(&img, &mut gray, imgproc::COLOR_BGR2GRAY)?;
+        let mut blurred = Mat::default();
+        imgproc::gaussian_blur_def(&gray, &mut blurred, Size::new(7, 7), 1.5)?;
+        let mut threshold = Mat::default();
+        imgproc::threshold(
+            &blurred,
+            &mut threshold,
+            0.,
+            255.,
+            THRESH_BINARY + THRESH_OTSU,
+        )?;
+        let mut contours = VectorOfVectorOfPoint::new();
+        imgproc::find_contours(
+            &threshold,
+            &mut contours,
+            RETR_EXTERNAL,
+            CHAIN_APPROX_SIMPLE,
+            opencv::core::Point_::new(0, 0),
+        )?;
+        contours
+    }
+    .iter()
+    .map(|x| bounding_rect(&x).unwrap())
+    .filter_map(|x| {
+        if x.width * x.height > 10000 {
+            Some((x.width, x.height, x.x, x.y))
+        } else {
+            None
+        }
+    })
+    .collect())
+}
+
+/*
 fn find_answer_boxes(path: &str) -> Result<Option<(usize, usize, usize, usize)>> {
     let source_image = image::open(path)?.to_luma8();
     let detection = canny(
@@ -104,36 +214,29 @@ fn find_answer_boxes(path: &str) -> Result<Option<(usize, usize, usize, usize)>>
     }
     assert!(vertical_box_starts.len() % 4 == 0);
     let mut vertical_box_starts_trimmed = vec![0; vertical_box_starts.len() / 2];
-    for i in 1..=vertical_box_starts.len() / 4 {
-        vertical_box_starts_trimmed[i..i+1] = vertical_box_starts[i * 1..i * 3];
-        println!("vertical lines {:#?}", vertical_box_starts);
+    for (idx, i) in (1..=vertical_box_starts.len() / 4).enumerate() {
+        let idx = idx * 2;
+        vertical_box_starts_trimmed[idx] = vertical_box_starts[i * 4 - 3];
+        vertical_box_starts_trimmed[idx + 1] = vertical_box_starts[i * 4 - 2];
     }
+    println!("vertical lines {:#?}", vertical_box_starts_trimmed);
 
     let largest = *horizontal_lines.iter().max().unwrap_or(&0);
-    let max_range = largest as f32 * 0.95;
+    let max_range = largest as f32 * 0.85;
     let mut horizontal_box_starts = Vec::with_capacity(4);
     for (idx, row) in horizontal_lines.iter().enumerate() {
         if *row > (max_range + 0.5) as i32 {
             horizontal_box_starts.push(idx);
         }
     }
-    assert!(horizontal_box_starts.len() == 4);
-    if horizontal_box_starts[0].max(horizontal_box_starts[1])
-        - horizontal_box_starts[0].min(horizontal_box_starts[1])
-        > 5
-    {
-        println!("box upper dimensions too variable");
-        return Ok(None);
+    assert!(horizontal_box_starts.len() % 4 == 0);
+    let mut horizontal_box_starts_trimmed = vec![0; horizontal_box_starts.len() / 2];
+    for (idx, i) in (1..=horizontal_box_starts.len() / 4).enumerate() {
+        let idx = idx * 2;
+        horizontal_box_starts_trimmed[idx] = horizontal_box_starts[i * 4 - 3];
+        horizontal_box_starts_trimmed[idx + 1] = horizontal_box_starts[i * 4 - 2];
     }
-    if horizontal_box_starts[2].max(horizontal_box_starts[3])
-        - horizontal_box_starts[2].min(horizontal_box_starts[3])
-        > 5
-    {
-        println!("box bottom dimensions too variable");
-        return Ok(None);
-    }
-    horizontal_box_starts = horizontal_box_starts[1..3].to_vec();
-    println!("horizontal lines {:#?}", horizontal_box_starts);
+    println!("horizontal lines {:#?}", horizontal_box_starts_trimmed);
 
     let (height, width) = (
         vertical_box_starts[1] - vertical_box_starts[0],
@@ -147,6 +250,7 @@ fn find_answer_boxes(path: &str) -> Result<Option<(usize, usize, usize, usize)>>
         height,
     )))
 }
+*/
 
 // render latex pdf to png
 pub fn render_pdf_to_png_and_resize(
@@ -227,6 +331,7 @@ fn main() -> Result<()> {
         fs::create_dir("work")?;
     }
 
+    println!("Saving og pdf as image");
     let (original_width, original_height) = save_pdf_as_image("input.pdf", "work/original.png")?;
 
     let work_dir = fs::read_dir("work")?;
@@ -234,29 +339,23 @@ fn main() -> Result<()> {
     for entry in work_dir {
         let entry = entry?;
         if let Some(v) = entry.file_name().to_str() {
+            println!("{v}");
             if !v.starts_with("original") {
                 continue;
             }
-            pages.push(v.to_owned());
+            pages.push(format!("work/{v}"));
         }
     }
     pages.sort();
+    println!("{:#?}", pages);
 
-    let mut boxes = Vec::with_capacity(pages.len());
-    for (idx, page) in pages.iter().enumerate() {
-        let box_pos = find_answer_boxes(&page)?;
-        if let Some(v) = box_pos {
-            boxes.push(v);
-        } else {
-            println!("Box was not found for page {idx}, please type Yes to ignore");
-            let mut buffer = String::new();
-            stdin().read_line(&mut buffer)?;
-            if buffer.trim() != "Yes" {
-                panic!("mixing box found and user chose to quit");
-            }
-        }
+    println!("finding boxes");
+    for page in pages {
+        let boxes = find_answer_boxes(&page);
+        println!("page: {page} \n{:#?}", boxes);
     }
 
+    /*
     let offset_coordinates: Vec<(f64, f64, usize, usize)> = boxes
         .iter_mut()
         .map(|(x, y, w, h)| {
@@ -278,6 +377,7 @@ fn main() -> Result<()> {
     // TODO return pdf dims
     // Latex pdf
     save_pdf_as_image("test.pdf", "work/latex.png")?;
+    */
 
     Ok(())
 }
