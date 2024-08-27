@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0.86"
-cairo-rs = { version = "0.18.5", features = ["png", "pdf"] }
+cairo-rs = { version = "0.18.5", features = ["png", "pdf", "freetype"] }
 image = "0.25"
 poppler = { version = "0.5.1", features = ["render"] }
 lopdf = "0.33.0"
@@ -13,7 +13,8 @@ imagesize = "0.13.0"
 rusty_pdf = "0.21.0"
 rayon = "1.10.0"
 imageproc = "0.25.0"
-opencv = { version = "0.92.2", features = ["cudafilters", "cudaimgproc", "imgcodecs"] }
+opencv = { version = "0.92.2", features = ["cudafilters", "cudaimgproc", "imgcodecs", "clang-runtime"] }
+pdfium-render = "0.8.24"
 
 [profile.dev]
 debug = true

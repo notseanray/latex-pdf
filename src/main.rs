@@ -1,11 +1,14 @@
 use anyhow::Result;
+use cairo::freetype::Library;
 use cairo::Context;
+use cairo::FontFace;
 use cairo::Format;
 use cairo::ImageSurface;
+use cairo::ScaledFont;
 use image::DynamicImage;
 use image::ImageFormat;
 use image::ImageReader;
-use image::RgbImage;
+use image::RgbaImage;
 use imagesize::blob_size;
 use opencv::core::get_platfoms_info;
 use opencv::core::have_opencl;
@@ -27,6 +30,9 @@ use opencv::imgproc::RETR_EXTERNAL;
 use opencv::imgproc::THRESH_BINARY;
 use opencv::imgproc::THRESH_OTSU;
 use opencv::types::VectorOfVectorOfPoint;
+use pdfium_render::prelude::PdfRenderConfig;
+use pdfium_render::prelude::Pdfium;
+use pdfium_render::prelude::PdfiumError;
 use poppler::PopplerDocument;
 use poppler::PopplerPage;
 use rusty_pdf::lopdf::Document;
@@ -40,6 +46,55 @@ use std::io::Write;
 use std::io::{BufWriter, Cursor};
 use std::process::Command;
 
+pub fn save_pdf_as_image(path: &str, output_path: &str, enumerate: bool, input_width: Option<i32>, input_height: Option<i32>) -> Result<(f64, f64)> {
+    // Renders each page in the PDF file at the given path to a separate JPEG file.
+
+        // Bind to a Pdfium library in the same directory as our Rust executable.
+        // See the "Dynamic linking" section below.
+
+        let pdfium = Pdfium::default();
+
+        // Load the document from the given path...
+
+        let document = pdfium.load_pdf_from_file(path, None)?;
+
+        // ... set rendering options that will be applied to all pages...
+
+        let render_config = PdfRenderConfig::new()
+            .set_target_width(2000)
+            .set_maximum_height(2000);
+
+        // ... then render each page to a bitmap image, saving each image to a JPEG file.
+
+        for (index, page) in document.pages().iter().enumerate() {
+            let name = if enumerate {
+                if let Some((path, _extension)) = output_path.split_once(".") {
+                    let mut padded_page_num = format!("{index}");
+                    let page_num_str_len = format!("{index}").len();
+                    if page_num_str_len < 3 {
+                        for _ in 0..3 - page_num_str_len {
+                            padded_page_num = format!("0{padded_page_num}");
+                        }
+                    }
+                    format!("{path}_{padded_page_num}.png")
+                } else {
+                    unimplemented!()
+                }
+            } else {
+                output_path.to_owned()
+            };
+            page.render_with_config(&render_config)?
+                .as_image() // Renders this page to an image::DynamicImage...
+                .into_rgb8() // ... then converts it to an image::Image...
+                .save_with_format(
+                    name,
+                    image::ImageFormat::Jpeg
+                ) // ... and saves it to a file.
+                .map_err(|_| PdfiumError::ImageError)?;
+        }
+    Ok((0., 0.))
+}
+/*
 pub fn save_pdf_as_image(path: &str, output_path: &str, enumerate: bool, input_width: Option<i32>, input_height: Option<i32>) -> Result<(f64, f64)> {
     let doc: PopplerDocument = PopplerDocument::new_from_file(path, Some("upw")).unwrap();
     let version_string = doc.get_pdf_version_string();
@@ -65,14 +120,20 @@ pub fn save_pdf_as_image(path: &str, output_path: &str, enumerate: bool, input_w
             version_string, permissions
         );
 
-        let surface = ImageSurface::create(Format::A8, width, height).unwrap();
+        let surface = ImageSurface::create(Format::A8, width * 2, height * 2).unwrap();
         let ctx = Context::new(&surface).unwrap();
         ctx.set_antialias(cairo::Antialias::Subpixel);
         ctx.font_options().unwrap().set_antialias(cairo::Antialias::Subpixel);
         ctx.font_options().unwrap().set_hint_style(cairo::HintStyle::Full);
+        let lib = Library::init().unwrap();
+        // Load a font face
+        let face = lib.new_face("./menlo.ttf", 0).unwrap();
+        // Set the font size
+        face.set_char_size(40 * 64, 0, 50, 0).unwrap();
+        ctx.set_font_face(&FontFace::create_from_ft(&face)?);
 
         ctx.save().unwrap();
-        page.render_for_printing(&ctx);
+        page.render(&ctx);
         ctx.restore().unwrap();
         ctx.show_page().unwrap();
 
@@ -86,6 +147,7 @@ pub fn save_pdf_as_image(path: &str, output_path: &str, enumerate: bool, input_w
                     }
                 }
                 let mut f: File = File::create(format!("{path}_{padded_page_num}.png")).unwrap();
+                surface.set_device_scale(0.1, 0.1);
                 surface.write_to_png(&mut f).expect("Unable to write PNG");
             }
         } else {
@@ -96,6 +158,7 @@ pub fn save_pdf_as_image(path: &str, output_path: &str, enumerate: bool, input_w
     }
     Ok((width, height))
 }
+*/
 
 fn find_answer_boxes(path: &str) -> Result<Vec<(i32, i32, i32, i32)>> {
     let opencl_have = have_opencl()?;
@@ -278,16 +341,16 @@ pub fn render_pdf_to_png_and_resize(
         DynamicImage::ImageLuma8(rgba_img) => {
             let rgba_img = rgba_img.as_raw();
 
-            let mut rgb_img = vec![0u8; (width * height * 3) as usize];
+            let mut rgb_img = vec![0u8; (width * height * 4) as usize];
             for (idx, chunk) in rgba_img.iter().enumerate() {
-                let i = idx * 3;
-                rgb_img[i..i + 3].copy_from_slice(&[255 - *chunk, 255 - *chunk, 255 - *chunk]);
+                let i = idx * 4;
+                rgb_img[i..i + 4].copy_from_slice(&[255 - *chunk, 255 - *chunk, 255 - *chunk, if *chunk > 0 { 255 } else { 0 }]);
             }
-            DynamicImage::ImageRgb8(
-                RgbImage::from_raw(width, height, rgb_img).expect("Corrupt png"),
+            DynamicImage::ImageRgba8(
+                RgbaImage::from_raw(width, height, rgb_img).expect("Corrupt png"),
             )
         }
-        _ => img,
+        _ => img.into_rgba8().into(),
     };
     let rgb_img = rgb_img.crop(0, 0, target_width, target_height);
     rgb_img.write_to(&mut writer, ImageFormat::Png)?;
