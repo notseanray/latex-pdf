@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0.86"
-cairo-rs = { version = "0.18.5", features = ["png", "pdf", "freetype"] }
+#cairo-rs = { version = "0.18.5", features = ["png", "pdf", "freetype"] }
 image = "0.25"
 poppler = { version = "0.5.1", features = ["render"] }
 lopdf = "0.33.0"

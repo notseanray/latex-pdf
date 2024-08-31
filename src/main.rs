@@ -1,10 +1,5 @@
 use anyhow::Result;
-use cairo::freetype::Library;
-use cairo::Context;
-use cairo::FontFace;
-use cairo::Format;
-use cairo::ImageSurface;
-use cairo::ScaledFont;
+use image::open;
 use image::DynamicImage;
 use image::ImageFormat;
 use image::ImageReader;
@@ -28,15 +23,15 @@ use opencv::imgproc::bounding_rect;
 use opencv::imgproc::CHAIN_APPROX_SIMPLE;
 use opencv::imgproc::RETR_EXTERNAL;
 use opencv::imgproc::THRESH_BINARY;
+use opencv::imgproc::THRESH_BINARY_INV;
 use opencv::imgproc::THRESH_OTSU;
 use opencv::types::VectorOfVectorOfPoint;
+use pdfium_render::prelude::PdfPageImageObject;
+use pdfium_render::prelude::PdfPageObjectsCommon;
+use pdfium_render::prelude::PdfPoints;
 use pdfium_render::prelude::PdfRenderConfig;
 use pdfium_render::prelude::Pdfium;
 use pdfium_render::prelude::PdfiumError;
-use poppler::PopplerDocument;
-use poppler::PopplerPage;
-use rusty_pdf::lopdf::Document;
-use rusty_pdf::{PDFSigningDocument, Rectangle};
 use std::fs;
 use std::fs::File;
 use std::io::stdin;
@@ -46,52 +41,54 @@ use std::io::Write;
 use std::io::{BufWriter, Cursor};
 use std::process::Command;
 
-pub fn save_pdf_as_image(path: &str, output_path: &str, enumerate: bool, input_width: Option<i32>, input_height: Option<i32>) -> Result<(f64, f64)> {
+pub fn save_pdf_as_image(pdfium: &Pdfium, path: &str, output_path: &str, enumerate: bool, input_width: Option<i32>, input_height: Option<i32>) -> Result<(f64, f64)> {
     // Renders each page in the PDF file at the given path to a separate JPEG file.
 
-        // Bind to a Pdfium library in the same directory as our Rust executable.
-        // See the "Dynamic linking" section below.
+    // Bind to a Pdfium library in the same directory as our Rust executable.
+    // See the "Dynamic linking" section below.
 
-        let pdfium = Pdfium::default();
+    // Load the document from the given path...
 
-        // Load the document from the given path...
+    println!("pages");
+    let document = pdfium.load_pdf_from_file(path, None)?;
 
-        let document = pdfium.load_pdf_from_file(path, None)?;
+    // ... set rendering options that will be applied to all pages...
 
-        // ... set rendering options that will be applied to all pages...
+    let (width, height) = (input_width.unwrap_or(794), input_height.unwrap_or(1028));
+    let render_config = PdfRenderConfig::new()
+        .set_target_width(width)
+        .set_maximum_height(height);
 
-        let render_config = PdfRenderConfig::new()
-            .set_target_width(2000)
-            .set_maximum_height(2000);
+    // ... then render each page to a bitmap image, saving each image to a JPEG file.
 
-        // ... then render each page to a bitmap image, saving each image to a JPEG file.
-
-        for (index, page) in document.pages().iter().enumerate() {
-            let name = if enumerate {
-                if let Some((path, _extension)) = output_path.split_once(".") {
-                    let mut padded_page_num = format!("{index}");
-                    let page_num_str_len = format!("{index}").len();
-                    if page_num_str_len < 3 {
-                        for _ in 0..3 - page_num_str_len {
-                            padded_page_num = format!("0{padded_page_num}");
-                        }
+    for (index, page) in document.pages().iter().enumerate() {
+        let name = if enumerate {
+            if let Some((path, _extension)) = output_path.split_once(".") {
+                let mut padded_page_num = format!("{index}");
+                let page_num_str_len = format!("{index}").len();
+                if page_num_str_len < 3 {
+                    for _ in 0..3 - page_num_str_len {
+                        padded_page_num = format!("0{padded_page_num}");
                     }
-                    format!("{path}_{padded_page_num}.png")
-                } else {
-                    unimplemented!()
                 }
+                format!("{path}_{padded_page_num}.png")
             } else {
-                output_path.to_owned()
-            };
-            page.render_with_config(&render_config)?
-                .as_image() // Renders this page to an image::DynamicImage...
-                .into_rgb8() // ... then converts it to an image::Image...
-                .save_with_format(
-                    name,
-                    image::ImageFormat::Jpeg
-                ) // ... and saves it to a file.
-                .map_err(|_| PdfiumError::ImageError)?;
-        }
+                unimplemented!()
+            }
+        } else {
+            output_path.to_owned()
+        };
+        println!("rendering page");
+        page.render_with_config(&render_config)?
+            .as_image() // Renders this page to an image::DynamicImage...
+            .into_rgba8() // ... then converts it to an image::Image...
+            .save_with_format(
+                &name,
+                image::ImageFormat::Png
+            ) // ... and saves it to a file.
+            .map_err(|_| PdfiumError::ImageError)?;
+        //render_pdf_to_png_and_resize(&name, &name, width  as u32, height as u32)?;
+    }
     Ok((0., 0.))
 }
 /*
@@ -196,7 +193,7 @@ fn find_answer_boxes(path: &str) -> Result<Vec<(i32, i32, i32, i32)>> {
         let mut gray = UMat::new_def();
         imgproc::cvt_color_def(&img, &mut gray, imgproc::COLOR_BGR2GRAY)?;
         let mut blurred = UMat::new_def();
-        imgproc::gaussian_blur_def(&gray, &mut blurred, Size::new(7, 7), 1.5)?;
+        imgproc::gaussian_blur_def(&gray, &mut blurred, Size::new(1, 1), 0.)?;
         let mut threshold = UMat::new_def();
         imgproc::threshold(
             &blurred,
@@ -218,8 +215,16 @@ fn find_answer_boxes(path: &str) -> Result<Vec<(i32, i32, i32, i32)>> {
         let img = imgcodecs::imread_def(path)?;
         let mut gray = Mat::default();
         imgproc::cvt_color_def(&img, &mut gray, imgproc::COLOR_BGR2GRAY)?;
+        let mut threshold = Mat::default();
+        imgproc::threshold(
+            &gray,
+            &mut threshold,
+            0.,
+            255.,
+            THRESH_BINARY_INV + THRESH_OTSU,
+        )?;
         let mut blurred = Mat::default();
-        imgproc::gaussian_blur_def(&gray, &mut blurred, Size::new(7, 7), 1.5)?;
+        imgproc::gaussian_blur_def(&threshold, &mut blurred, Size::new(1, 1), 0.)?;
         let mut threshold = Mat::default();
         imgproc::threshold(
             &blurred,
@@ -344,7 +349,7 @@ pub fn render_pdf_to_png_and_resize(
             let mut rgb_img = vec![0u8; (width * height * 4) as usize];
             for (idx, chunk) in rgba_img.iter().enumerate() {
                 let i = idx * 4;
-                rgb_img[i..i + 4].copy_from_slice(&[255 - *chunk, 255 - *chunk, 255 - *chunk, if *chunk > 0 { 255 } else { 0 }]);
+                rgb_img[i..i + 4].copy_from_slice(&[255 - *chunk, 255 - *chunk, 255 - *chunk, if *chunk > 0 { 0 } else { 255 }]);
             }
             DynamicImage::ImageRgba8(
                 RgbaImage::from_raw(width, height, rgb_img).expect("Corrupt png"),
@@ -358,6 +363,19 @@ pub fn render_pdf_to_png_and_resize(
     Ok(())
 }
 
+pub fn place_png_on_pdf(
+    input_pdf: &str,
+    page_num: u32,
+    image_input: &str,
+    x: f32,
+    y: f32,
+    width: usize,
+    height: usize,
+) -> Result<()> {
+    Ok(())
+}
+
+/*
 pub fn place_png_on_pdf(
     input_pdf: &str,
     page_num: u32,
@@ -399,6 +417,9 @@ pub fn place_png_on_pdf(
     test_doc.finished().save("output.pdf").unwrap();
     Ok(())
 }
+*/
+
+
 
 fn check_for_yes(quit_msg: &str) -> Result<()> {
     println!("type yes if you need ");
@@ -410,7 +431,7 @@ fn check_for_yes(quit_msg: &str) -> Result<()> {
     Ok(())
 }
 
-fn render_latex(latex_solution: &str, idx: usize, width: i32, height: i32) -> Result<String> {
+fn render_latex(pdfium: &Pdfium, latex_solution: &str, idx: usize, width: i32, height: i32) -> Result<String> {
     let path = format!("work/problem_{idx}.tex");
     fs::write(&path, latex_solution)?;
     let output = Command::new("tectonic").args([&path]).output()?;
@@ -420,11 +441,12 @@ fn render_latex(latex_solution: &str, idx: usize, width: i32, height: i32) -> Re
         println!("{output}");
         check_for_yes("quit due to user selection")?;
     }
-    let png_path = format!("work/problem_{idx}.png");
+    //let png_path = format!("work/problem_{idx}.png");
     let path = format!("work/problem_{idx}.pdf");
     println!("{path}");
-    save_pdf_as_image(&path, &png_path, false, Some(width), Some(height))?;
-    Ok(png_path)
+    println!("saving");
+    //save_pdf_as_image(pdfium, &path, &png_path, false, Some(width), Some(height))?;
+    Ok(path)
 }
 
 fn main() -> Result<()> {
@@ -435,6 +457,9 @@ fn main() -> Result<()> {
         let entry = entry?;
         std::fs::remove_file(entry.path())?;
     }
+    println!("test");
+    let pdfium = Pdfium::default();
+    println!("test2");
 
     //let latex = render_latex("math.tex")?;
     let f = File::open("math.tex")?;
@@ -455,7 +480,7 @@ fn main() -> Result<()> {
     latex.push(prev_buf.to_owned());
 
     //println!("Saving og pdf as image");
-    let (original_width, original_height) = save_pdf_as_image("input.pdf", "work/original.png", true, None, None)?;
+    let (original_width, original_height) = save_pdf_as_image(&pdfium, "input.pdf", "work/original.png", true, None, None)?;
 
     let work_dir = fs::read_dir("work")?;
     let mut pages = vec![];
@@ -484,11 +509,27 @@ fn main() -> Result<()> {
     println!("boxes");
     println!("{:#?}", page_boxes);
 
+    let mut page = pdfium.load_pdf_from_file("input.pdf", None)?;
+    let a4_width = 8.27;
+    let a4_height = 11.69;
+    let padding = 0.001;
     for (idx, ((page_num, rect), latex)) in page_boxes.iter().zip(latex).enumerate() {
-        let latex = render_latex(&latex, idx, rect.0, rect.1)?;
+        let latex = render_latex(&pdfium, &latex, idx, rect.0, rect.1)?;
         println!("placing problem {page_num} {latex}");
-        place_png_on_pdf("input.pdf", *page_num as u32, &latex, rect.2 as f64, rect.3 as f64, rect.0 as usize, rect.1 as usize)?;
+        //place_png_on_pdf("input.pdf", *page_num as u32, &latex, rect.2 as f32, rect.3 as f32, rect.0 as usize, rect.1 as usize)?;
+        let latex = pdfium.load_pdf_from_file(&latex, None)?.pages().first()?.render_with_config(&PdfRenderConfig::new().set_target_width(794 * 3))?.as_image();
+        //let latex = image::open(&latex)?;
+        let latex = latex.crop_imm(0, 0, latex.width(), rect.1 as u32);
+        let mut object = PdfPageImageObject::new_with_width(
+            &page,
+            &latex,
+            PdfPoints::new(794.),
+        )?;
+        object.scale(0.5, 0.5)?;
+        object.translate(PdfPoints::from_inches((rect.2 as f32 / 794.) * a4_width + padding), PdfPoints::from_inches(((rect.3 as f32) / 1028.) * a4_height - padding))?;
+        page.pages_mut().get(*page_num as u16)?.objects_mut().add_image_object(object)?;
     }
+    page.save_to_file("output.pdf")?;
 
     //save_pdf_as_image("test.pdf", "work/latex.png")?;
 
